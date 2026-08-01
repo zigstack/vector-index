@@ -5,6 +5,7 @@
 //! When the library is absent the store's exact scan serves instead; FAISS
 //! is an accelerator, never a correctness dependency.
 const std = @import("std");
+const builtin = @import("builtin");
 
 const F = struct {
     faiss_IndexFlatIP_new_with: *const fn (*?*anyopaque, i64) callconv(.c) c_int,
@@ -18,7 +19,22 @@ var state: enum { unprobed, absent, loaded } = .unprobed;
 fn load() bool {
     if (state == .unprobed) {
         state = .absent;
-        blk: {
+        if (builtin.os.tag == .windows) {
+            // std.DynLib has no Windows implementation in this std snapshot;
+            // LoadLibrary/GetProcAddress covers the same probe.
+            const w = struct {
+                extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
+                extern "kernel32" fn GetProcAddress(mod: *anyopaque, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
+            };
+            blk: {
+                const mod = w.LoadLibraryA("faiss_c.dll") orelse break :blk;
+                inline for (@typeInfo(F).@"struct".fields) |fld| {
+                    const p = w.GetProcAddress(mod, fld.name) orelse break :blk;
+                    @field(f, fld.name) = @ptrCast(@alignCast(p));
+                }
+                state = .loaded;
+            }
+        } else blk: {
             var lib = std.DynLib.open("libfaiss_c.so") catch
                 std.DynLib.open("libfaiss_c.dylib") catch break :blk;
             inline for (@typeInfo(F).@"struct".fields) |fld| {
